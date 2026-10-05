@@ -3,4 +3,5 @@
   <Project Path="Conecta.Application/Conecta.Application.csproj" />
   <Project Path="Conecta.Domain/Conecta.Domain.csproj" />
   <Project Path="Conecta.Infrastructure/Conecta.Infrastructure.csproj" />
+  <Project Path="Conecta.Tests/Conecta.Tests.csproj" />
 </Solution>
