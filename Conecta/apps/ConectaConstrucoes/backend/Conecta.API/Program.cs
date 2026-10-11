@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text;
 using Conecta.Application.Categorias;
 using Conecta.Infrastructure.Persistencia;
+using Conecta.Infrastructure;
+using Conecta.Infrastructure.Database;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Authorization;
@@ -10,16 +12,25 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
 using Swashbuckle.AspNetCore.SwaggerGen;
 
-var builder = WebApplication.CreateBuilder(args);
+var somenteMigracoes = args.Contains("--migrate-only");
+var builder = WebApplication.CreateBuilder(args.Where(a => a != "--migrate-only").ToArray());
 string Obrigatorio(string nome) => builder.Configuration[nome] is { Length: > 0 } valor
     ? valor : throw new InvalidOperationException($"Configure {nome} por variável de ambiente ou user-secrets.");
-var conexao = Obrigatorio("ConnectionStrings:Conecta");
+builder.Services.AddInfrastructure(builder.Configuration);
+// Permite aplicar somente as migrations com a configuração do banco, sem exigir um emissor JWT.
+if (somenteMigracoes)
+{
+    using var migracaoApp = builder.Build();
+    using var scope = migracaoApp.Services.CreateScope();
+    scope.ServiceProvider.GetRequiredService<EvolveDatabaseMigrator>().Migrate();
+    return;
+}
 var emissor = Obrigatorio("Jwt:Issuer");
 var audiencia = Obrigatorio("Jwt:Audience");
 var chave = Obrigatorio("Jwt:SigningKey");
 if (Encoding.UTF8.GetByteCount(chave) < 32) throw new InvalidOperationException("Jwt:SigningKey deve ter pelo menos 32 bytes.");
 
-builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(conexao));
+
 builder.Services.AddScoped<ICategoriaRepositorio, CategoriaRepositorio>();
 builder.Services.AddScoped<CategoriaServico>();
 builder.Services.AddControllers();
@@ -61,7 +72,17 @@ builder.Services.AddSwaggerGen(o =>
     o.OperationFilter<SegurancaSwagger>();
 });
 
+builder.Services.AddCors(options => options.AddPolicy("AllowFrontend", policy => policy
+    .WithOrigins("http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173", "http://frontend:80", "http://frontend")
+    .AllowAnyHeader().AllowAnyMethod().AllowCredentials()));
 var app = builder.Build();
+if (builder.Configuration.GetValue("Database:MigrateOnStartup", true))
+{
+    using var scope = app.Services.CreateScope();
+    // Falha explicitamente se o schema não puder ser preparado; não inicia uma API incompatível.
+    scope.ServiceProvider.GetRequiredService<EvolveDatabaseMigrator>().Migrate();
+}
 app.UseExceptionHandler(tratamento => tratamento.Run(async contexto =>
 {
     var erro = contexto.Features.Get<IExceptionHandlerFeature>()?.Error;
@@ -75,6 +96,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+app.UseCors("AllowFrontend");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();

@@ -1,7 +1,7 @@
 using Conecta.Domain.Entidades;
 using Microsoft.EntityFrameworkCore;
 
-namespace Conecta.Infrastructure.Persistencia;
+namespace Conecta.Infrastructure.Data;
 
 public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
 {
@@ -12,6 +12,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
     protected override void OnModelCreating(ModelBuilder m)
     {
+        base.OnModelCreating(m);
+        m.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);
         var u = m.Entity<Usuario>();
         u.ToTable("usuarios");
         u.HasKey(x => x.Id);
@@ -26,6 +28,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         u.Property(x => x.MediaAvaliacao).HasPrecision(3, 2).HasDefaultValue(0m);
         u.Property(x => x.TotalAvaliacoes).HasDefaultValue(0);
         u.Property(x => x.DataCriacao).HasDefaultValueSql("CURRENT_TIMESTAMP");
+        // V1/V2 da equipe usam timestamp sem fuso nestes campos de suporte.
+        var utcLegado = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<DateTime, DateTime>(
+            valor => DateTime.SpecifyKind(valor.ToUniversalTime(), DateTimeKind.Unspecified),
+            valor => DateTime.SpecifyKind(valor, DateTimeKind.Utc));
+        u.Property(x => x.DataCriacao).HasColumnType("timestamp without time zone").HasConversion(utcLegado);
+        u.Property(x => x.TermosAceitosEm).HasColumnType("timestamp without time zone").HasConversion(utcLegado);
 
         var p = m.Entity<Prestador>();
         p.ToTable("prestadores");

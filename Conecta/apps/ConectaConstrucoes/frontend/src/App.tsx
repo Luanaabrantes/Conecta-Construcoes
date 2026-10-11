@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import heroImg from './assets/hero.png'
 import reactLogo from './assets/react.svg'
 import viteLogo from './assets/vite.svg'
 import './App.css'
@@ -11,14 +10,13 @@ function App() {
     <>
       <section id="center">
         <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+          <img src={viteLogo} className="vite" alt="Vite logo" width="80" height="80" />
+          <img src={reactLogo} className="framework" alt="React logo" width="80" height="80" />
         </div>
         <div>
-          <h1>Get started</h1>
+          <h1>Conecta Construções</h1>
           <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
+            Ambiente Web React + Vite conteinerizado e pronto para integração com o backend .NET.
           </p>
         </div>
         <button
@@ -26,7 +24,7 @@ function App() {
           className="counter"
           onClick={() => setCount((count) => count + 1)}
         >
-          Count is {count}
+          Cliques: {count}
         </button>
       </section>
 

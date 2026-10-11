@@ -1,3 +1,4 @@
+using Conecta.Infrastructure.Data;
 using Conecta.Application.Categorias;
 using Conecta.Domain.Entidades;
 using Microsoft.EntityFrameworkCore;

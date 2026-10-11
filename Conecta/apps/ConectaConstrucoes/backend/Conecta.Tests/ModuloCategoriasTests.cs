@@ -8,7 +8,13 @@ using System.Text;
 using System.Text.Json;
 using Conecta.Application.Categorias;
 using Conecta.Domain.Entidades;
-using Conecta.Infrastructure.Persistencia;
+using Conecta.Infrastructure;
+using Conecta.Domain.Interfaces;
+using Microsoft.Extensions.DependencyInjection;
+using Conecta.Infrastructure.Data;
+using Conecta.Infrastructure.Database;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -28,7 +34,8 @@ public sealed class Ambiente : WebApplicationFactory<Program>, IAsyncLifetime
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
-        builder.UseSetting("ConnectionStrings:Conecta", Conexao);
+        builder.UseSetting("ConnectionStrings:DefaultConnection", Conexao);
+        builder.UseSetting("Database:MigrateOnStartup", "false");
         builder.UseSetting("Jwt:Issuer", "con012-test");
         builder.UseSetting("Jwt:Audience", "con012-test-api");
         builder.UseSetting("Jwt:SigningKey", Chave);
@@ -42,8 +49,24 @@ public sealed class Ambiente : WebApplicationFactory<Program>, IAsyncLifetime
         await using var cmd = new NpgsqlCommand($"CREATE SCHEMA {esquema}", cn);
         await cmd.ExecuteNonQueryAsync();
         Conexao = new NpgsqlConnectionStringBuilder(conexaoBase) { SearchPath = esquema }.ConnectionString;
+        // Prepara V1/V2 e dados reais de domínio antes de V3 para verificar atualização sem perda.
+        using (var preparacao = new NpgsqlConnection(Conexao))
+            new EvolveDb.Evolve(preparacao)
+            {
+                Locations = [Path.Combine(AppContext.BaseDirectory, "Database", "Migrations")],
+                Schemas = [esquema], MetadataTableSchema = esquema, IsEraseDisabled = true,
+                TargetVersion = new EvolveDb.Migration.MigrationVersion("2.0")
+            }.Migrate();
+        await using (var preexistentes = new NpgsqlConnection(Conexao))
+        {
+            await preexistentes.OpenAsync();
+            await using var inserir = new NpgsqlCommand("INSERT INTO usuarios(id,email,senha_hash,perfil) VALUES (1001,'con012-upgrade@example.invalid','SEM-LOGIN-TESTE','PRESTADOR'); INSERT INTO prestadores(usuario_id,nome_fantasia) VALUES (1001,'CON012 Upgrade'); INSERT INTO categorias(id,nome,slug,descricao,ativo) VALUES (1001,'CON012 Preexistente','con012-preexistente','Preservar',false); INSERT INTO prestador_categorias(prestador_id,categoria_id) VALUES (1001,1001)", preexistentes);
+            await inserir.ExecuteNonQueryAsync();
+        }
         await using var db = Banco();
-        await db.Database.MigrateAsync();
+        var configuracao = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        { ["ConnectionStrings:DefaultConnection"] = Conexao }).Build();
+        new EvolveDatabaseMigrator(configuracao, NullLogger<EvolveDatabaseMigrator>.Instance).Migrate();
         db.Usuarios.AddRange(Enumerable.Range(101, 2).Select(id => new Usuario
         { Id = id, Email = $"con012-test-{id}@example.invalid", SenhaHash = "SEM-LOGIN-TESTE", Perfil = "PRESTADOR" }));
         db.Prestadores.AddRange(Enumerable.Range(101, 2).Select(id => new Prestador { UsuarioId = id, NomeFantasia = $"CON012 Teste {id}" }));
@@ -268,5 +291,83 @@ public sealed class ModuloCategoriasTests(Ambiente ambiente) : IClassFixture<Amb
                 Assert.False(caminhos.GetProperty("/api/categorias").GetProperty("get").TryGetProperty("security", out _));
             }
         }
+    }
+
+    [Fact]
+    public async Task EvolveAtualizaV2SemPerderDadosEReexecucaoNaoDuplicaHistorico()
+    {
+        var configuracao = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string,string?>
+        { ["ConnectionStrings:DefaultConnection"] = ambiente.Conexao }).Build();
+        new EvolveDatabaseMigrator(configuracao, NullLogger<EvolveDatabaseMigrator>.Instance).Migrate();
+        await using var banco = ambiente.Banco();
+        var categoria = await banco.Categorias.SingleAsync(c => c.Id == 1001);
+        Assert.Equal("Preservar", categoria.Descricao);
+        Assert.False(categoria.Ativo);
+        var vinculo = await banco.PrestadorCategorias.SingleAsync(v => v.PrestadorId == 1001 && v.CategoriaId == 1001);
+        Assert.Equal(DateTimeKind.Utc, vinculo.AdicionadoEm.Kind);
+        Assert.Equal(DateTimeKind.Utc, categoria.CriadoEm.Kind);
+        await using var cn = new NpgsqlConnection(ambiente.Conexao);
+        await cn.OpenAsync();
+        await using var comando = new NpgsqlCommand("SELECT count(*) FROM changelog WHERE type=0 AND success=true",cn);
+        Assert.Equal(3L, (long)(await comando.ExecuteScalarAsync())!);
+        await using var historico = new NpgsqlCommand("SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name='__EFMigrationsHistory'",cn);
+        Assert.Equal(0L, (long)(await historico.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
+    public async Task EvolveRecusaHistoricoEfSemAlterarDados()
+    {
+        var esquema = "con012_guard_" + Guid.NewGuid().ToString("N");
+        await using var controle = new NpgsqlConnection(ambiente.Conexao);
+        await controle.OpenAsync();
+        await using (var criar = new NpgsqlCommand($"CREATE SCHEMA {esquema}; CREATE TABLE {esquema}.\"__EFMigrationsHistory\"(id int); INSERT INTO {esquema}.\"__EFMigrationsHistory\" VALUES (123)",controle)) await criar.ExecuteNonQueryAsync();
+        try
+        {
+            var conexao = new NpgsqlConnectionStringBuilder(ambiente.Conexao) { SearchPath = esquema }.ConnectionString;
+            var configuracao = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string,string?>
+            { ["ConnectionStrings:DefaultConnection"] = conexao }).Build();
+            var erro = Assert.Throws<InvalidOperationException>(() => new EvolveDatabaseMigrator(configuracao,NullLogger<EvolveDatabaseMigrator>.Instance).Migrate());
+            Assert.Contains("Banco legado", erro.Message);
+            await using var conferir = new NpgsqlCommand($"SELECT id FROM {esquema}.\"__EFMigrationsHistory\"",controle);
+            Assert.Equal(123, (int)(await conferir.ExecuteScalarAsync())!);
+        }
+        finally
+        {
+            await using var remover = new NpgsqlCommand($"DROP SCHEMA {esquema} CASCADE",controle);
+            await remover.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData("DefaultConnection")]
+    [InlineData("Conecta")]
+    public async Task EfEDapperUsamAMesmaConexaoEUmUnicoContexto(string nome)
+    {
+        var configuracao = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string,string?>
+        { [$"ConnectionStrings:{nome}"] = ambiente.Conexao }).Build();
+        var servicos = new ServiceCollection();
+        servicos.AddInfrastructure(configuracao);
+        servicos.AddSingleton<IConfiguration>(configuracao);
+        Assert.Single(servicos, s => s.ServiceType == typeof(AppDbContext));
+        await using var provider = servicos.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var esperado = new NpgsqlConnectionStringBuilder(ambiente.Conexao); var ef = new NpgsqlConnectionStringBuilder(db.Database.GetConnectionString()); Assert.Equal((esperado.Host, esperado.Port, esperado.Database, esperado.SearchPath), (ef.Host, ef.Port, ef.Database, ef.SearchPath));
+        using var cn = scope.ServiceProvider.GetRequiredService<IDbConnectionFactory>().CreateConnection();
+        cn.Open();
+        Assert.Equal("monorepo_db", cn.Database);
+        var dapper = new NpgsqlConnectionStringBuilder(cn.ConnectionString); Assert.Equal((esperado.Host, esperado.Port, esperado.Database, esperado.SearchPath), (dapper.Host, dapper.Port, dapper.Database, dapper.SearchPath));
+    }
+
+    [Fact]
+    public async Task CorsPermiteFrontendDaEquipe()
+    {
+        using var cliente = ambiente.Cliente();
+        using var requisicao = new HttpRequestMessage(HttpMethod.Options,"/api/categorias");
+        requisicao.Headers.Add("Origin","http://localhost:5173");
+        requisicao.Headers.Add("Access-Control-Request-Method","POST");
+        var resposta = await cliente.SendAsync(requisicao);
+        Assert.Equal(HttpStatusCode.NoContent,resposta.StatusCode);
+        Assert.Equal("http://localhost:5173",resposta.Headers.GetValues("Access-Control-Allow-Origin").Single());
     }
 }
