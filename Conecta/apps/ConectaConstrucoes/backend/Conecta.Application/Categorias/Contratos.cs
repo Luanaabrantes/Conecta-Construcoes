@@ -16,12 +16,12 @@ public sealed class ErroModulo(int status, string mensagem) : Exception(mensagem
 
 public interface ICategoriaRepositorio
 {
-    Task<List<Categoria>> Listar(bool incluirInativas, CancellationToken ct);
-    Task<Categoria?> PorSlug(string slug, CancellationToken ct);
-    Task<Categoria?> PorId(int id, CancellationToken ct);
-    Task Salvar(Categoria categoria, CancellationToken ct);
-    Task<bool> PrestadorExiste(int id, CancellationToken ct);
-    Task<List<PrestadorCategoria>> Especialidades(int prestadorId, CancellationToken ct);
-    Task AdicionarEspecialidade(int prestadorId, int categoriaId, CancellationToken ct);
-    Task RemoverEspecialidade(int prestadorId, int categoriaId, CancellationToken ct);
+    Task<List<Categoria>> Listar(bool incluirInativas, CancellationToken cancellationToken);
+    Task<Categoria?> PorSlug(string slug, CancellationToken cancellationToken);
+    Task<Categoria?> PorId(int categoriaId, CancellationToken cancellationToken);
+    Task Salvar(Categoria categoria, CancellationToken cancellationToken);
+    Task<bool> PrestadorExiste(int prestadorId, CancellationToken cancellationToken);
+    Task<List<PrestadorCategoria>> Especialidades(int prestadorId, CancellationToken cancellationToken);
+    Task AdicionarEspecialidade(int prestadorId, int categoriaId, CancellationToken cancellationToken);
+    Task RemoverEspecialidade(int prestadorId, int categoriaId, CancellationToken cancellationToken);
 }
